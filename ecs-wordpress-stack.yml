@@ -1,0 +1,167 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Pilha do WordPress usando o Amazon ECS
+
+Parameters:
+  ClusterName:
+    Type: String
+    Default: "WordPressCluster"
+    Description: Nome do cluster ECS do WordPress
+
+  InstanceType:
+    Type: String
+    Default: "t2.micro"
+    Description: Tipo de instância para os containers do WordPress
+   
+  Subnet1:
+    Type: String
+    Default: ""
+    Description: Subnet1
+   
+  Subnet2:
+    Type: String
+    Default: ""
+    Description: Subnet2
+    
+  VPCSecurityGroups:
+    Type: String
+    Default: ""
+    Description: Security Group
+    
+  VpcId:
+    Type: String
+    Default: ""
+    Description: VPC
+  
+  SecurityGroups:
+    Type: String
+    Default: ""
+    Description: SecurityGroups
+
+Resources:
+  EFSFileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      PerformanceMode: generalPurpose
+      ThroughputMode: bursting
+
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ClusterName
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: WordPressTask
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: "256"
+      Memory: "512"
+      ExecutionRoleArn: arn:aws:iam::${AWS::AccountId}:role/ecsExecutionRole
+      Volumes:
+        - Name: wordpress-data
+          EFSVolumeConfiguration:
+            FilesystemId: !Ref EFSFileSystem
+            RootDirectory: /wordpress
+      ContainerDefinitions:
+        - Name: wordpress
+          Image: wordpress:latest
+          PortMappings:
+            - ContainerPort: 80
+          MountPoints:
+            - ContainerPath: /var/www/html
+              SourceVolume: wordpress-data
+
+  Service:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref ECSCluster
+      LaunchType: FARGATE
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: 2
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets:
+            - !Ref Subnet1 # Subnet ID (pública)
+            - !Ref Subnet2 # Subnet ID (pública)
+          SecurityGroups:
+            - !Ref SecurityGroups  # Security Group ID
+
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Subnets:
+            - !Ref Subnet1 # Subnet ID (pública)
+            - !Ref Subnet2 # Subnet ID (pública)
+      SecurityGroups:
+            - !Ref SecurityGroups  # Security Group ID
+      Scheme: internet-facing
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '60'
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: 200
+            ContentType: text/plain
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Port: 80
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !Ref VpcId # VPC ID
+
+  ScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: 5
+      MinCapacity: 2
+      ResourceId: !Sub service/${Service}/cluster/${ECSCluster}
+      RoleARN: arn:aws:iam::${AWS::AccountId}:role/ecsAutoscaleRole
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+
+  ScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: ScaleOut
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref ScalingTarget
+      StepScalingPolicyConfiguration:
+        AdjustmentType: PercentChangeInCapacity
+        Cooldown: 60
+        MetricAggregationType: Average
+        StepAdjustments:
+          - MetricIntervalLowerBound: 0
+            ScalingAdjustment: 2
+            MetricIntervalUpperBound: 10
+
+  DBInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      AllocatedStorage: "20"
+      DBInstanceClass: "db.t2.micro"
+      Engine: "mysql"
+      EngineVersion: "5.7"
+      MasterUsername: "dbadmin"
+      MasterUserPassword: "Teste123"
+      DBInstanceIdentifier: "WordPressDB"
+      PubliclyAccessible: false
+      VPCSecurityGroups:
+        - !Ref SecurityGroups  # Security Group ID
+      StorageType: "gp2"
+
+Outputs:
+  WordPressURL:
+    Description: URL do WordPress
+    Value: !GetAtt ALB.DNSName
